@@ -205,3 +205,19 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+
+
+
+
+# 忽略 PyCharm 的配置文件
+.idea/
+
+# 忽略 Python 缓存
+__pycache__/
+
+# 忽略敏感信息
+cookies.txt
+
+# 忽略临时下载目录
+temp_downloads/
