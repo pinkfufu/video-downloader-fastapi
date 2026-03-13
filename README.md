@@ -29,7 +29,7 @@ conda create -n venv_downloader python=3.10 -y && conda activate venv_downloader
 
 为了下载 1080P+ 或受限视频，请将浏览器的 Cookie 导出为 `cookies.txt` (Netscape 格式) 并放入项目根目录。
 
-通过chrome**chrome浏览器插件**：Get cookies.txt LOCALLY
+通过**chrome浏览器插件**：Get cookies.txt LOCALLY
 
 ![chrome浏览器插件](https://cdn.jsdelivr.net/gh/pinkfufu/pinkfufu-img/img/image-20260310145419486.png)
 
@@ -37,7 +37,7 @@ conda create -n venv_downloader python=3.10 -y && conda activate venv_downloader
 
 ![导出Cookie](https://cdn.jsdelivr.net/gh/pinkfufu/pinkfufu-img/img/image-20260310145929941.png)
 
-到处Cookie后，重命名为`cookies.txt`
+利用插件导出Cookie后，重命名为`cookies.txt`
 
 ![重命名](https://cdn.jsdelivr.net/gh/pinkfufu/pinkfufu-img/img/image-20260310150039229.png)
 
