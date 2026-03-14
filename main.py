@@ -10,6 +10,14 @@ import uuid
 # 启动命令：uvicorn main:app --host 0.0.0.0 --port 8000
 # 警告：不要在开发环境下频繁保存代码触发 reload，否则会导致内存中的 download_tasks 任务丢失报错 404。
 
+# 服务器部署：
+# sudo apt update && sudo apt install ffmpeg -y
+# apt install uvicorn
+# apt install python3.12-venv
+# python3 -m venv venv
+# source venv/bin/activate
+# pip install fastapi uvicorn yt-dlp "numpy<2"
+# nohup uvicorn main:app --host 0.0.0.0 --port 8000 --workers 1 > /dev/null 2>&1 &
 app = FastAPI()
 
 # 全局任务字典 (生产环境建议使用 SQLite 或 Redis)
@@ -34,6 +42,10 @@ def download_worker(url, task_id):
         'no_warnings': True,
         'progress_hooks': [lambda d: ydl_progress_hook(d, task_id)],
         'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'http_headers': {
+            'Referer': 'https://www.bilibili.com/',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        }
     }
 
     # Cookie 逻辑优化
