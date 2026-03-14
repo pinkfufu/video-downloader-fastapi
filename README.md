@@ -55,6 +55,22 @@ uvicorn main:app --host 0.0.0.0 --port 8000
 
 访问：`http://localhost:8000` 即可开始使用。
 
+
+
+Ubuntu22.04部署:
+
+```
+sudo apt update && sudo apt install ffmpeg -y
+apt install uvicorn
+apt install python3.12-venv
+python3 -m venv venv
+source venv/bin/activate
+pip install fastapi uvicorn yt-dlp "numpy<2"
+nohup uvicorn main:app --host 0.0.0.0 --port 8000 --workers 1 > /dev/null 2>&1 &
+```
+
+
+
 ## 🤝 贡献指南
 
 1. Fork 本项目。
