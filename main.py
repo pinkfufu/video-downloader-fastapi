@@ -41,15 +41,7 @@ def download_worker(url, task_id):
         'quiet': True,
         'no_warnings': True,
         'progress_hooks': [lambda d: ydl_progress_hook(d, task_id)],
-<<<<<<< Updated upstream
         'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-        'http_headers': {
-            'Referer': 'https://www.bilibili.com/',
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        }
-=======
-        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
->>>>>>> Stashed changes
     }
 
     # Cookie 逻辑优化
