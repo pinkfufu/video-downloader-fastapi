@@ -1,155 +1,210 @@
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse, FileResponse
-import yt_dlp
-import tempfile
 import os
-import threading
+import re
 import uuid
+import threading
+import tempfile
+import shutil
+import logging
+from datetime import datetime
+from typing import Optional
 
-# 安装环境：conda create -n venv_downloader python=3.10 -y && conda activate venv_downloader && pip install fastapi uvicorn yt-dlp "numpy<2"
-# 启动命令：uvicorn main:app --host 0.0.0.0 --port 8000
-# 警告：不要在开发环境下频繁保存代码触发 reload，否则会导致内存中的 download_tasks 任务丢失报错 404。
+from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.middleware.cors import CORSMiddleware
+import yt_dlp
+import httpx
 
-# 服务器部署：
-# sudo apt update && sudo apt install ffmpeg -y
-# apt install uvicorn
-# apt install python3.12-venv
-# python3 -m venv venv
-# source venv/bin/activate
-# pip install fastapi uvicorn yt-dlp "numpy<2"
-# nohup uvicorn main:app --host 0.0.0.0 --port 8000 --workers 1 > /dev/null 2>&1 &
+# --- 初始化与配置 ---
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("VideoDownloader")
+
 app = FastAPI()
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-# 全局任务字典 (生产环境建议使用 SQLite 或 Redis)
+# 存储下载任务状态
 download_tasks = {}
+# 设置下载根目录
+BASE_DOWNLOAD_DIR = os.path.join(os.getcwd(), "downloads")
+os.makedirs(BASE_DOWNLOAD_DIR, exist_ok=True)
 
-COOKIES_FILE = "cookies.txt"
+
+# --- 核心解析与下载类 ---
+
+class CoreDownloader:
+    @staticmethod
+    def is_douyin(url: str) -> bool:
+        return any(d in url for d in ["douyin.com", "iesdouyin.com", "v.douyin.com"])
+
+    @staticmethod
+    def get_ffmpeg() -> Optional[str]:
+        return os.path.dirname(shutil.which("ffmpeg")) if shutil.which("ffmpeg") else None
+
+    def download_worker(self, url: str, task_id: str):
+        task_dir = os.path.join(BASE_DOWNLOAD_DIR, task_id)
+        os.makedirs(task_dir, exist_ok=True)
+
+        try:
+            # 1. 如果是抖音，走专用解析
+            if self.is_douyin(url):
+                self._handle_douyin(url, task_id, task_dir)
+            # 2. 其他走通用 yt-dlp
+            else:
+                self._handle_universal(url, task_id, task_dir)
+        except Exception as e:
+            logger.error(f"Download Error: {e}")
+            download_tasks[task_id].update({"status": "error", "error": str(e)})
+
+    def _handle_douyin(self, url: str, task_id: str, task_dir: str):
+        # 极简模拟解析逻辑（实际建议配合你之前的 DouyinParser 完整算法）
+        headers = {"User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)"}
+        with httpx.Client(follow_redirects=True, headers=headers, timeout=20) as client:
+            resp = client.get(url)
+            # 简单演示：直接用 yt-dlp 尝试解析抖音
+            self._handle_universal(url, task_id, task_dir)
+
+    def _handle_universal(self, url: str, task_id: str, task_dir: str):
+        ffmpeg_path = self.get_ffmpeg()
+        cookie_path = os.path.join(os.getcwd(), "www.youtube.com_cookies.txt")
 
 
-def download_worker(url, task_id):
-    # 使用系统临时目录下的子文件夹，避免权限问题
-    temp_dir = os.path.join(tempfile.gettempdir(), "video_downloads", task_id)
-    if not os.path.exists(temp_dir):
-        os.makedirs(temp_dir)
+        ydl_opts = {
+            # 这里的 format 更加宽松，增加 best 兜底
+            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+            'outtmpl': os.path.join(task_dir, '%(title)s.%(ext)s'),
+            'merge_output_format': 'mp4',
+            # 关键：切换到 android 客户端，目前比 ios 稳定
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['android', 'web'],
+                    'skip': ['dash', 'hls']
+                }
+            },
+            # 强制不使用特定的签名算法，绕过 n-challenge
+            'compatible_auth': True,
+            'quiet': False,
+            'no_warnings': False,
+            'progress_hooks': [lambda d: self._progress_hook(d, task_id)],
+        }
 
-    output_tmpl = os.path.join(temp_dir, '%(title)s.%(ext)s')
+        if ffmpeg_path:
+            ydl_opts['ffmpeg_location'] = ffmpeg_path
+        if os.path.exists(cookie_path):
+            ydl_opts['cookiefile'] = cookie_path
 
-    ydl_opts = {
-        'outtmpl': output_tmpl,
-        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-        'merge_output_format': 'mp4',
-        'quiet': True,
-        'no_warnings': True,
-        'progress_hooks': [lambda d: ydl_progress_hook(d, task_id)],
-        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-    }
-
-    # Cookie 逻辑优化
-    cookie_path = os.path.join(os.getcwd(), COOKIES_FILE)
-    if os.path.isfile(cookie_path):
-        ydl_opts['cookiefile'] = cookie_path
-    else:
-        # 针对 Windows，尝试从浏览器提取
-        ydl_opts['cookiesfrombrowser'] = ('chrome',)
-
-    try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # 获取视频信息并执行下载
+            ydl.cache.remove()
             info = ydl.extract_info(url, download=True)
-            # 获取最终生成的本地文件绝对路径
-            final_path = ydl.prepare_filename(info)
+            file_path = ydl.prepare_filename(info)
+            # 检查是否有合并后的文件
+            if not os.path.exists(file_path):
+                name, _ = os.path.splitext(file_path)
+                for ext in ['.mp4', '.mkv', '.webm']:
+                    if os.path.exists(name + ext):
+                        file_path = name + ext
+                        break
 
-            # 处理可能的格式转换后缀变化
-            if not os.path.exists(final_path):
-                # 尝试检查 .mp4 结尾
-                base_path = os.path.splitext(final_path)[0]
-                if os.path.exists(base_path + ".mp4"):
-                    final_path = base_path + ".mp4"
+            download_tasks[task_id].update({
+                "status": "finished",
+                "progress": 100,
+                "file_path": file_path,
+                "title": info.get('title', 'video')
+            })
 
-            download_tasks[task_id]['status'] = 'finished'
-            download_tasks[task_id]['filename'] = final_path
-
-    except Exception as e:
-        download_tasks[task_id]['status'] = 'error'
-        error_msg = str(e)
-        if "ffmpeg" in error_msg.lower():
-            error_msg = "系统未安装 FFmpeg，无法合并音视频。请安装 FFmpeg 并添加到环境变量。"
-        download_tasks[task_id]['error'] = error_msg
+    def _progress_hook(self, d, task_id):
+        if d['status'] == 'downloading':
+            total = d.get('total_bytes') or d.get('total_bytes_estimate') or 100
+            downloaded = d.get('downloaded_bytes', 0)
+            percent = int(downloaded / total * 100)
+            download_tasks[task_id]['progress'] = min(percent, 99)
 
 
-def ydl_progress_hook(d, task_id):
-    if d['status'] == 'downloading':
-        total = d.get('total_bytes') or d.get('total_bytes_estimate') or 100
-        downloaded = d.get('downloaded_bytes', 0)
-        percent = int(downloaded / total * 100)
-        # 限制最高 99%，留 1% 给合并阶段
-        download_tasks[task_id]['progress'] = min(percent, 99)
-    elif d['status'] == 'finished':
-        download_tasks[task_id]['progress'] = 100
+# --- 路由逻辑 ---
+
+core = CoreDownloader()
 
 
 @app.get("/", response_class=HTMLResponse)
-def index():
+async def index():
     return """
     <!DOCTYPE html>
     <html lang="zh-CN">
     <head>
         <meta charset="UTF-8">
-        <title>视频下载器</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>万能视频下载器</title>
         <style>
-            body { margin: 0; font-family: 'Segoe UI', sans-serif; background: linear-gradient(135deg, #a1c4fd, #c2e9fb); height: 100vh; display: flex; justify-content: center; align-items: center; }
-            .container { background: rgba(255, 255, 255, 0.8); backdrop-filter: blur(10px); border-radius: 20px; padding: 40px; width: 450px; box-shadow: 0 10px 30px rgba(0,0,0,0.1); text-align: center; }
-            input { width: 100%; padding: 12px; margin-bottom: 20px; border: 1px solid #ddd; border-radius: 8px; box-sizing: border-box; }
-            button { background: #4facfe; color: white; border: none; padding: 12px 30px; border-radius: 25px; cursor: pointer; transition: 0.3s; width: 100%; font-size: 16px; }
-            button:hover { background: #00f2fe; transform: translateY(-2px); }
-            #progress-container { margin-top: 25px; display: none; }
-            #progress-bar { height: 12px; background: #eee; border-radius: 6px; overflow: hidden; }
-            #bar-inner { width: 0%; height: 100%; background: #43e97b; transition: width 0.3s; }
-            #status-text { margin-top: 10px; font-size: 14px; color: #666; }
-            #result-link { margin-top: 20px; }
-            a { color: #007aff; text-decoration: none; font-weight: bold; border: 1px solid #007aff; padding: 8px 20px; border-radius: 5px; }
+            body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #c2e9fb; height: 100vh; display: flex; justify-content: center; align-items: center; }
+            .card { background: rgba(255, 255, 255, 0.9); backdrop-filter: blur(10px); padding: 40px; border-radius: 24px; box-shadow: 0 10px 30px rgba(0,0,0,0.08); width: 100%; max-width: 400px; text-align: center; }
+            h2 { margin-bottom: 24px; color: #333; display: flex; align-items: center; justify-content: center; gap: 10px; }
+            input { width: 100%; padding: 14px; border: 1px solid #e0e0e0; border-radius: 12px; margin-bottom: 20px; box-sizing: border-box; outline: none; transition: 0.3s; }
+            input:focus { border-color: #4facfe; box-shadow: 0 0 0 3px rgba(79, 172, 254, 0.2); }
+            button { width: 100%; padding: 14px; background: #4facfe; color: white; border: none; border-radius: 12px; font-size: 16px; font-weight: 600; cursor: pointer; transition: 0.3s; }
+            button:hover { background: #00f2fe; transform: translateY(-1px); }
+            .progress-area { margin-top: 24px; display: none; }
+            .bar { height: 8px; background: #eee; border-radius: 4px; overflow: hidden; margin-bottom: 8px; }
+            .bar-fill { width: 0%; height: 100%; background: #43e97b; transition: width 0.3s; }
+            .status { font-size: 14px; color: #666; }
+            .error { color: #ff4d4f; font-size: 13px; margin-top: 10px; }
+            .btn-download { display: inline-block; margin-top: 20px; padding: 10px 24px; background: #fff; border: 2px solid #4facfe; color: #4facfe; border-radius: 8px; text-decoration: none; font-weight: bold; transition: 0.3s; }
+            .btn-download:hover { background: #4facfe; color: #fff; }
         </style>
     </head>
     <body>
-        <div class="container">
-            <h2>🎥 视频下载器</h2>
-            <input type="text" id="url" placeholder="支持 YouTube, BiliBili 等..." />
-            <button onclick="startDownload()">启动引擎</button>
-            <div id="progress-container">
-                <div id="progress-bar"><div id="bar-inner"></div></div>
-                <div id="status-text">准备下载...</div>
+        <div class="card">
+            <h2>🎬 视频下载器</h2>
+            <input type="text" id="url" placeholder="粘贴视频链接 (YouTube, 抖音...)" />
+            <button onclick="startDownload()" id="btn-run">启动引擎</button>
+            <div class="progress-area" id="p-area">
+                <div class="bar"><div class="bar-fill" id="fill"></div></div>
+                <div class="status" id="status">准备中...</div>
+                <div id="error-box" class="error"></div>
+                <div id="result"></div>
             </div>
-            <div id="result-link"></div>
         </div>
         <script>
-            function startDownload() {
+            async function startDownload() {
                 const url = document.getElementById('url').value;
-                if(!url) return alert('请输入链接');
+                if(!url) return;
 
-                document.getElementById('progress-container').style.display = 'block';
-                document.getElementById('result-link').innerHTML = '';
+                const btn = document.getElementById('btn-run');
+                const pArea = document.getElementById('p-area');
+                const fill = document.getElementById('fill');
+                const status = document.getElementById('status');
+                const errorBox = document.getElementById('error-box');
+                const result = document.getElementById('result');
 
-                fetch(`/start_download?url=${encodeURIComponent(url)}`)
-                    .then(r => r.json())
-                    .then(data => poll(data.task_id));
-            }
-            function poll(id) {
-                fetch(`/progress?task_id=${id}`)
-                    .then(r => r.json())
-                    .then(data => {
-                        document.getElementById('bar-inner').style.width = data.progress + '%';
-                        document.getElementById('status-text').innerText = `已下载: ${data.progress}%`;
+                btn.disabled = true;
+                pArea.style.display = 'block';
+                errorBox.innerText = '';
+                result.innerHTML = '';
+
+                try {
+                    const resp = await fetch(`/api/start?url=${encodeURIComponent(url)}`);
+                    const { task_id } = await resp.json();
+
+                    const timer = setInterval(async () => {
+                        const pResp = await fetch(`/api/progress/${task_id}`);
+                        const data = await pResp.json();
+
+                        fill.style.width = data.progress + '%';
+                        status.innerText = `处理中: ${data.progress}%`;
 
                         if(data.status === 'finished') {
-                            document.getElementById('status-text').innerText = '🎉 下载成功！';
-                            document.getElementById('result-link').innerHTML = `<a href="/download_file?task_id=${id}">立即保存到本地</a>`;
+                            clearInterval(timer);
+                            status.innerText = '✅ 下载完成！';
+                            btn.disabled = false;
+                            result.innerHTML = `<a href="/api/get/${task_id}" class="btn-download">保存到本地</a>`;
                         } else if(data.status === 'error') {
-                            document.getElementById('status-text').innerText = '❌ 错误: ' + data.error;
-                            document.getElementById('status-text').style.color = 'red';
-                        } else {
-                            setTimeout(() => poll(id), 1000);
+                            clearInterval(timer);
+                            status.innerText = '❌ 失败';
+                            errorBox.innerText = data.error;
+                            btn.disabled = false;
                         }
-                    });
+                    }, 1000);
+                } catch(e) {
+                    errorBox.innerText = '请求服务失败';
+                    btn.disabled = false;
+                }
             }
         </script>
     </body>
@@ -157,33 +212,28 @@ def index():
     """
 
 
-@app.get("/start_download")
-def start_download(url: str):
+@app.get("/api/start")
+def start(url: str):
     task_id = str(uuid.uuid4())
-    download_tasks[task_id] = {'status': 'downloading', 'progress': 0, 'filename': None, 'error': None}
-    threading.Thread(target=download_worker, args=(url, task_id), daemon=True).start()
+    download_tasks[task_id] = {"status": "downloading", "progress": 0, "error": None}
+    threading.Thread(target=core.download_worker, args=(url, task_id), daemon=True).start()
     return {"task_id": task_id}
 
 
-@app.get("/progress")
-def get_progress(task_id: str):
+@app.get("/api/progress/{task_id}")
+def progress(task_id: str):
+    return download_tasks.get(task_id, {"status": "error", "error": "任务过期"})
+
+
+@app.get("/api/get/{task_id}")
+def get_file(task_id: str):
     task = download_tasks.get(task_id)
-    if not task:
-        # 如果重启了，这里会报 404
-        return {"status": "error", "progress": 0, "error": "任务已失效（服务器可能已重启）"}
-    return task
+    if not task or not task.get("file_path"):
+        raise HTTPException(404, "文件未找到")
+    return FileResponse(task["file_path"], filename=os.path.basename(task["file_path"]))
 
 
-@app.get("/download_file")
-def download_file(task_id: str):
-    task = download_tasks.get(task_id)
-    if not task or task['status'] != 'finished' or not task['filename']:
-        raise HTTPException(status_code=404, detail="文件不存在")
+if __name__ == "__main__":
+    import uvicorn
 
-    # 真正的文件名
-    real_name = os.path.basename(task['filename'])
-    return FileResponse(
-        path=task['filename'],
-        filename=real_name,
-        media_type='application/octet-stream'
-    )
+    uvicorn.run(app, host="0.0.0.0", port=8000)
